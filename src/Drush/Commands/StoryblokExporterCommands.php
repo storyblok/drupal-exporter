@@ -120,7 +120,7 @@ final class StoryblokExporterCommands extends DrushCommands {
                 "datasource_entry" =>  [
                   "name" => $tag,
                   "value" => $tag,
-                  "datasource_id" => 386850,
+                  "datasource_id" => Settings::get('STORYBLOK_DATASOURCE_ID', null),
                 ],
               ],
             ]);
