@@ -2,8 +2,7 @@
 
 namespace Drupal\storyblok_exporter\Drush\Commands;
 
-use Consolidation\OutputFormatters\StructuredData\RowsOfFields;
-use Drupal\Core\Utility\Token;
+use Storyblok\Mapi\Endpoints\AssetApi;
 use Drush\Attributes as CLI;
 use Drush\Commands\AutowireTrait;
 use Drush\Commands\DrushCommands;
@@ -13,8 +12,7 @@ use Drupal\Core\Datetime\DateFormatterInterface;
 use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\File\FileSystemInterface;
 use Drupal\Core\Site\Settings;
-use GuzzleHttp\ClientInterface;
-use GuzzleHttp\Exception\GuzzleException;
+use Storyblok\Mapi\MapiClient;
 
 /**
  * A Drush commandfile.
@@ -23,7 +21,10 @@ final class StoryblokExporterCommands extends DrushCommands {
 
   use AutowireTrait;
 
-  private const STORYBLOK_API_URL = 'https://mapi.storyblok.com/v1/spaces/';
+  private const COMPONENT_TYPE = 'article';
+
+  private MapiClient $storyblokClient;
+  private string $spaceId;
 
   /**
    * Constructs a StoryblokExporterCommands object.
@@ -33,22 +34,23 @@ final class StoryblokExporterCommands extends DrushCommands {
     private DateFormatterInterface $dateFormatter,
     private FileUrlGeneratorInterface $fileUrlGenerator,
     private FileSystemInterface $fileSystem,
-    private ClientInterface $httpClient,
   ) {
     parent::__construct();
+    $this->storyblokClient = MapiClient::init(Settings::get('STORYBLOK_OAUTH_TOKEN'));
+    $this->spaceId = Settings::get('STORYBLOK_SPACE_ID');
   }
 
   /**
-   * Command description here.
+   * Exports Drupal articles to Storyblok.
    */
   #[CLI\Command(name: 'storyblok_exporter:export', aliases: ['sbe'])]
   #[CLI\Option(name: 'limit', description: 'LIMIT the number of nodes to export')]
   #[CLI\Usage(name: 'storyblok_exporter:export --limit=10', description: 'Export and migrate up to 10 articles to Storyblok')]
-  public function commandName($options = ['limit' => null]) {
+  public function commandName($options = ['limit' => NULL]) {
     $query = \Drupal::entityQuery('node')
       ->accessCheck(FALSE)
       ->condition('status', 1)
-      ->condition('type', 'article');
+      ->condition('type', self::COMPONENT_TYPE);
 
     if ($options['limit']) {
       $query->range(0, $options['limit']);
@@ -58,7 +60,6 @@ final class StoryblokExporterCommands extends DrushCommands {
     $nodes = $this->entityTypeManager->getStorage('node')->loadMultiple($nids);
 
     $toBeExported = [];
-
     foreach ($nodes as $node) {
       $toBeExported[] = [
         'title' => $node->label(),
@@ -70,22 +71,23 @@ final class StoryblokExporterCommands extends DrushCommands {
       ];
     }
 
-    //$this->output()->writeln(print_r($toBeExported, TRUE));
-
     $migrated = $this->migrateToStoryblok($toBeExported);
 
     $this->logger()->success(sprintf('Exported %d articles to Storyblok.', $migrated));
     $this->logger()->success(dt('Content succesfully exported 🎉'));
   }
 
+  /**
+   *
+   */
   private function getImage(NodeInterface $node): ?array {
     if ($node->get('field_image')->isEmpty()) {
-      return null;
+      return NULL;
     }
 
     $file = $node->get('field_image')->entity;
     if (!$file) {
-      return null;
+      return NULL;
     }
 
     return [
@@ -94,6 +96,9 @@ final class StoryblokExporterCommands extends DrushCommands {
     ];
   }
 
+  /**
+   *
+   */
   private function getTags(NodeInterface $node): array {
     $tags = [];
     foreach ($node->get('field_tags') as $tag) {
@@ -104,159 +109,116 @@ final class StoryblokExporterCommands extends DrushCommands {
     return $tags;
   }
 
+  /**
+   *
+   */
   private function migrateToStoryblok(array $content): int {
     $migratedCount = 0;
+    $managementApi = $this->storyblokClient->managementApi();
+    $assetApi = $this->storyblokClient->assetApi($this->spaceId);
 
     foreach ($content as $item) {
-      if (!empty($item['tags'])) {
-        foreach($item['tags'] as $tag) {
-          try {
-            $response = $this->httpClient->request('POST', self::STORYBLOK_API_URL . Settings::get('STORYBLOK_SPACE_ID', null) . '/datasource_entries', [
-              'headers' => [
-                'Authorization' => Settings::get('STORYBLOK_OAUTH_TOKEN', null),
-                'Content-Type' => 'application/json',
-              ],
-              'json' => [
-                "datasource_entry" =>  [
-                  "name" => $tag,
-                  "value" => $tag,
-                  "datasource_id" => Settings::get('STORYBLOK_DATASOURCE_ID', null),
-                ],
-              ],
-            ]);
-
-            if ($response->getStatusCode() === 201) {
-              $this->output()->writeln("Successfully created datasource entry: " . $tag);
-            } else {
-              $this->output()->writeln("Failed create datasource entry: " . $tag . ". Status code: " . $response->getStatusCode());
-            }
-          } catch (GuzzleException $e) {}
-        }
-      }
-
-      // Upload image if exists
-      $imageUrl = null;
+      // Upload image if exists.
+      $imageUrl = NULL;
       if (!empty($item['image'])) {
         $this->output()->writeln("Uploading image: " . $item['image']['filename']);
-        $imageUrl = $this->uploadImageToStoryblok($item['image']);
+        $imageUrl = $this->uploadImageToStoryblok($assetApi, $item['image']);
       }
 
       try {
-        $response = $this->httpClient->request('POST', self::STORYBLOK_API_URL . Settings::get('STORYBLOK_SPACE_ID', null) . '/stories', [
-          'headers' => [
-            'Authorization' => Settings::get('STORYBLOK_OAUTH_TOKEN', null),
-            'Content-Type' => 'application/json',
-          ],
-          'json' => [
-            'story' => [
-              'name' => $item['title'],
-              'created_at' => $item['created_date'],
-              'slug' => $this->generateSlug($item['title']),
-              'content' => [
-                'component' => 'article',
-                'title' => $item['title'],
-                'body' => $item['body'],
-                'image' => [
-                  "id" => null,
-                  "alt" => null,
-                  "name" => "",
-                  "focus" => "",
-                  "title" => null,
-                  "source" => null,
-                  "filename" => $imageUrl,
-                  "copyright" => null,
-                  "fieldtype" => "asset",
-                  "meta_data" => [],
-                  "is_external_url" => false,
-                ],
-                'tags' => $item['tags'],
+        $storyData = [
+          'story' => [
+            'name' => $item['title'],
+            'created_at' => $item['created_date'],
+            'slug' => $this->generateSlug($item['title']),
+            'content' => [
+              'component' => 'article',
+              'title' => $item['title'],
+              'body' => $item['body'],
+              'image' => [
+                "id" => NULL,
+                "alt" => NULL,
+                "name" => "",
+                "focus" => "",
+                "title" => NULL,
+                "source" => NULL,
+                "filename" => $imageUrl,
+                "copyright" => NULL,
+                "fieldtype" => "asset",
+                "meta_data" => [],
+                "is_external_url" => FALSE,
               ],
-              "is_folder" => false,
-              "parent_id" => 0,
-              "disable_fe_editor" => false,
-              "path" => null,
-              "is_startpage" => false,
-              "publish" => false,
+              'tags' => $item['tags'],
             ],
+            "is_folder" => FALSE,
+            "parent_id" => 0,
+            "disable_fe_editor" => FALSE,
+            "path" => NULL,
+            "is_startpage" => FALSE,
+            "publish" => FALSE,
           ],
-        ]);
+        ];
 
-        if ($response->getStatusCode() === 201) {
+        $response = $managementApi->post(
+          "spaces/{$this->spaceId}/stories",
+          $storyData
+        );
+
+        if ($response->isOk()) {
           $migratedCount++;
-          $this->output()->writeln("Successfully migrated: " . $item['title']);
-        } else {
-          $this->output()->writeln("Failed to migrate: " . $item['title'] . ". Status code: " . $response->getStatusCode());
+          $this->logger()->success("Successfully migrated: " . $item['title']);
         }
-      } catch (GuzzleException $e) {
-        $this->output()->writeln("Error migrating: " . $item['title'] . ". Error: " . $e->getMessage());
+        else {
+          $this->logger()->error("Failed to migrate: " . $item['title'] . ". Error: " . $response->getErrorMessage());
+        }
+      }
+      catch (\Exception $e) {
+        $this->logger()->error("Error migrating: " . $item['title'] . ". Error: " . $e->getMessage());
       }
     }
 
     return $migratedCount;
   }
 
-  private function uploadImageToStoryblok(array $image): ?string {
+  /**
+   *
+   */
+  private function uploadImageToStoryblok(AssetApi $assetApi, array $image): ?string {
+    if (!isset($image['uri']) || !isset($image['filename'])) {
+      $this->logger()->error('Invalid image array provided');
+      return NULL;
+    }
+
     try {
       $filePath = $this->fileSystem->realpath($image['uri']);
 
-      $response = $this->httpClient->request('POST', self::STORYBLOK_API_URL . Settings::get('STORYBLOK_SPACE_ID', null) . '/assets', [
-        'headers' => [
-          'Authorization' => Settings::get('STORYBLOK_OAUTH_TOKEN', null),
-          'Content-Type' => 'application/json',
-        ],
-        'json' => [
-          "filename" => $image['filename'],
-          "validate_upload" =>  1
-        ],
-      ]);
+      // Use AssetApi's upload method which handles all three steps internally.
+      $response = $assetApi->upload($filePath);
 
-      if ($response->getStatusCode() !== 200) {
-        throw new \RuntimeException("Failed to initiate upload: " . $response->getBody());
+      if ($response->isOk()) {
+        $this->logger()->success("Successfully uploaded image: " . $image['filename']);
+        // Get the URL of the uploaded asset.
+        return $response->data()->get('filename');
       }
-
-      $signedResponse = json_decode($response->getBody()->getContents(), true);
-
-      $multipart = [];
-      foreach ($signedResponse['fields'] as $key => $value) {
-        $multipart[] = [
-          'name' => $key,
-          'contents' => $value,
-        ];
+      else {
+        throw new \RuntimeException("Failed to upload image: " . $response->getErrorMessage());
       }
-      $multipart[] = [
-        'name' => 'file',
-        'contents' => fopen($filePath, 'r'),
-        'filename' => $image['filename'],
-      ];
-
-      $s3Response = $this->httpClient->request('POST', $signedResponse['post_url'], [
-        'multipart' => $multipart,
-      ]);
-
-      if ($s3Response->getStatusCode() !== 204) {
-        throw new \RuntimeException("Failed to upload to S3: " . $s3Response->getBody());
-      }
-
-      $finalizeResponse = $this->httpClient->request('GET', self::STORYBLOK_API_URL . Settings::get('STORYBLOK_SPACE_ID', null) . '/assets/' . $signedResponse['id'] . '/finish_upload', [
-        'headers' => [
-          'Authorization' => Settings::get('STORYBLOK_OAUTH_TOKEN', null),
-        ],
-      ]);
-
-      if ($finalizeResponse->getStatusCode() !== 200) {
-        throw new \RuntimeException("Failed to finalize upload: " . $finalizeResponse->getBody());
-      }
-
-      $this->output()->writeln("Successfully uploaded image: " . $image['filename']);
-      return $signedResponse['pretty_url'];
-    } catch (GuzzleException $e) {
-      $this->output()->writeln("Error uploading image: " . $image['filename'] . ". Error: " . $e->getMessage());
     }
-
-    return null;
+    catch (\RuntimeException $e) {
+      $this->logger()->error("Runtime error uploading image: " . $e->getMessage());
+      return NULL;
+    }
+    catch (\Exception $e) {
+      $this->logger()->error("Unexpected error uploading image: " . $e->getMessage());
+      return NULL;
+    }
   }
 
+  /**
+   *
+   */
   private function generateSlug(string $title): string {
     return strtolower(preg_replace('/[^A-Za-z0-9-]+/', '-', $title));
   }
+
 }
