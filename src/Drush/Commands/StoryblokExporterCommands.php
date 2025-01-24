@@ -1,7 +1,9 @@
 <?php
-
 namespace Drupal\storyblok_exporter\Drush\Commands;
 
+use Storyblok\Mapi\Data\AssetData;
+use Storyblok\Mapi\Data\StoryData;
+use Storyblok\Mapi\Data\StoryblokData;
 use Storyblok\Mapi\Endpoints\AssetApi;
 use Drush\Attributes as CLI;
 use Drush\Commands\AutowireTrait;
@@ -12,6 +14,7 @@ use Drupal\Core\Datetime\DateFormatterInterface;
 use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\File\FileSystemInterface;
 use Drupal\Core\Site\Settings;
+use Storyblok\Mapi\Endpoints\TagApi;
 use Storyblok\Mapi\MapiClient;
 
 /**
@@ -42,11 +45,12 @@ final class StoryblokExporterCommands extends DrushCommands {
 
   /**
    * Exports Drupal articles to Storyblok.
+   * @param mixed $options
    */
   #[CLI\Command(name: 'storyblok_exporter:export', aliases: ['sbe'])]
   #[CLI\Option(name: 'limit', description: 'LIMIT the number of nodes to export')]
   #[CLI\Usage(name: 'storyblok_exporter:export --limit=10', description: 'Export and migrate up to 10 articles to Storyblok')]
-  public function commandName($options = ['limit' => NULL]) {
+  public function commandName($options = ['limit' => NULL]): void {
     $query = \Drupal::entityQuery('node')
       ->accessCheck(FALSE)
       ->condition('status', 1)
@@ -57,6 +61,8 @@ final class StoryblokExporterCommands extends DrushCommands {
     }
 
     $nids = $query->execute();
+
+    /** @var \Drupal\node\NodeInterface[] $nodes */
     $nodes = $this->entityTypeManager->getStorage('node')->loadMultiple($nids);
 
     $toBeExported = [];
@@ -74,7 +80,7 @@ final class StoryblokExporterCommands extends DrushCommands {
     $migrated = $this->migrateToStoryblok($toBeExported);
 
     $this->logger()->success(sprintf('Exported %d articles to Storyblok.', $migrated));
-    $this->logger()->success(dt('Content succesfully exported 🎉'));
+    $this->logger()->success(sprintf('Content succesfully exported 🎉'));
   }
 
   /**
@@ -110,59 +116,45 @@ final class StoryblokExporterCommands extends DrushCommands {
   }
 
   /**
-   *
+   * @param array<int,mixed> $content
    */
   private function migrateToStoryblok(array $content): int {
     $migratedCount = 0;
-    $managementApi = $this->storyblokClient->managementApi();
+    $storyApi = $this->storyblokClient->storyApi($this->spaceId);
     $assetApi = $this->storyblokClient->assetApi($this->spaceId);
+    $tagApi = $this->storyblokClient->tagApi($this->spaceId);
 
     foreach ($content as $item) {
-      // Upload image if exists.
+      // Upload image to Storyblok.
       $imageUrl = NULL;
       if (!empty($item['image'])) {
         $this->output()->writeln("Uploading image: " . $item['image']['filename']);
-        $imageUrl = $this->uploadImageToStoryblok($assetApi, $item['image']);
+        $image = $this->uploadImageToStoryblok($assetApi, $item['image']);
+      }
+
+      // Create tags in Storyblok.
+      if (!empty($item['tags'])) {
+        $this->output()->writeln("Creating tags: " . implode(', ', $item['tags']));
+        $this->createTagsInStoryblok($tagApi, $item['tags']);
       }
 
       try {
-        $storyData = [
-          'story' => [
-            'name' => $item['title'],
-            'created_at' => $item['created_date'],
-            'slug' => $this->generateSlug($item['title']),
-            'content' => [
-              'component' => 'article',
-              'title' => $item['title'],
-              'body' => $item['body'],
-              'image' => [
-                "id" => NULL,
-                "alt" => NULL,
-                "name" => "",
-                "focus" => "",
-                "title" => NULL,
-                "source" => NULL,
-                "filename" => $imageUrl,
-                "copyright" => NULL,
-                "fieldtype" => "asset",
-                "meta_data" => [],
-                "is_external_url" => FALSE,
-              ],
-              'tags' => $item['tags'],
-            ],
-            "is_folder" => FALSE,
-            "parent_id" => 0,
-            "disable_fe_editor" => FALSE,
-            "path" => NULL,
-            "is_startpage" => FALSE,
-            "publish" => FALSE,
-          ],
-        ];
+        $storyContent = new StoryblokData();
+        $storyContent->set('component', self::COMPONENT_TYPE);
+        $storyContent->set('title', $item['title']);
+        $storyContent->set('body', $item['body']);
+        $storyContent->set('image.id', $image->id());
+        $storyContent->set('image.fieldtype', 'asset');
+        $storyContent->set('image.filename', $image->filename());
 
-        $response = $managementApi->post(
-          "spaces/{$this->spaceId}/stories",
-          $storyData
-        );
+        $story = new StoryData();
+        $story->setName($item['title']);
+        $story->setSlug($this->generateSlug($item['title']));
+        $story->setContentType($this::COMPONENT_TYPE);
+        $story->setCreatedAt($item['created_date']);
+        $story->setContent($storyContent->toArray());
+
+        $response = $storyApi->create($story);
 
         if ($response->isOk()) {
           $migratedCount++;
@@ -181,9 +173,9 @@ final class StoryblokExporterCommands extends DrushCommands {
   }
 
   /**
-   *
+   * @param array<int,mixed> $image
    */
-  private function uploadImageToStoryblok(AssetApi $assetApi, array $image): ?string {
+  private function uploadImageToStoryblok(AssetApi $assetApi, array $image): ?AssetData {
     if (!isset($image['uri']) || !isset($image['filename'])) {
       $this->logger()->error('Invalid image array provided');
       return NULL;
@@ -192,13 +184,12 @@ final class StoryblokExporterCommands extends DrushCommands {
     try {
       $filePath = $this->fileSystem->realpath($image['uri']);
 
-      // Use AssetApi's upload method which handles all three steps internally.
       $response = $assetApi->upload($filePath);
 
       if ($response->isOk()) {
         $this->logger()->success("Successfully uploaded image: " . $image['filename']);
         // Get the URL of the uploaded asset.
-        return $response->data()->get('filename');
+        return $response->data();
       }
       else {
         throw new \RuntimeException("Failed to upload image: " . $response->getErrorMessage());
@@ -211,6 +202,21 @@ final class StoryblokExporterCommands extends DrushCommands {
     catch (\Exception $e) {
       $this->logger()->error("Unexpected error uploading image: " . $e->getMessage());
       return NULL;
+    }
+  }
+  /**
+   * @param array<int,mixed> $tags
+   */
+  private function createTagsInStoryblok(TagApi $tagApi, array $tags): void {
+    foreach ($tags as $tag) {
+      $response = $tagApi->create($tag);
+
+      if ($response->isOk()) {
+        $this->logger()->success("Successfully created tag: " . $tag);
+      }
+      else {
+        $this->logger()->error("Failed to create tag: " . $tag . ". Error: " . $response->getErrorMessage());
+      }
     }
   }
 
