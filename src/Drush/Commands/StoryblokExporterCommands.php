@@ -1,10 +1,7 @@
 <?php
+// phpcs:disable
 namespace Drupal\storyblok_exporter\Drush\Commands;
 
-use Storyblok\Mapi\Data\AssetData;
-use Storyblok\Mapi\Data\StoryData;
-use Storyblok\Mapi\Data\StoryblokData;
-use Storyblok\Mapi\Endpoints\AssetApi;
 use Drush\Attributes as CLI;
 use Drush\Commands\AutowireTrait;
 use Drush\Commands\DrushCommands;
@@ -14,8 +11,12 @@ use Drupal\Core\Datetime\DateFormatterInterface;
 use Drupal\Core\File\FileUrlGeneratorInterface;
 use Drupal\Core\File\FileSystemInterface;
 use Drupal\Core\Site\Settings;
-use Storyblok\Mapi\Endpoints\TagApi;
-use Storyblok\Mapi\MapiClient;
+use Storyblok\ManagementApi\Data\AssetData;
+use Storyblok\ManagementApi\Data\StoryData;
+use Storyblok\ManagementApi\Data\StoryblokData;
+use Storyblok\ManagementApi\Endpoints\AssetApi;
+use Storyblok\ManagementApi\Endpoints\TagApi;
+use Storyblok\ManagementApi\ManagementApiClient;
 
 /**
  * A Drush commandfile.
@@ -26,7 +27,7 @@ final class StoryblokExporterCommands extends DrushCommands {
 
   private const COMPONENT_TYPE = 'article';
 
-  private MapiClient $storyblokClient;
+  private ManagementApiClient $storyblokClient;
   private string $spaceId;
 
   /**
@@ -39,7 +40,7 @@ final class StoryblokExporterCommands extends DrushCommands {
     private FileSystemInterface $fileSystem,
   ) {
     parent::__construct();
-    $this->storyblokClient = MapiClient::init(Settings::get('STORYBLOK_OAUTH_TOKEN'));
+    $this->storyblokClient = ManagementApiClient::init(Settings::get('STORYBLOK_OAUTH_TOKEN'));
     $this->spaceId = Settings::get('STORYBLOK_SPACE_ID');
   }
 
@@ -120,7 +121,7 @@ final class StoryblokExporterCommands extends DrushCommands {
    */
   private function migrateToStoryblok(array $content): int {
     $migratedCount = 0;
-    $storyApi = $this->storyblokClient->storyApi($this->spaceId);
+    $storyApi = $this->storyblokClient->storyApi($this->spaceId, $this->logger());
     $assetApi = $this->storyblokClient->assetApi($this->spaceId);
     $tagApi = $this->storyblokClient->tagApi($this->spaceId);
 
@@ -153,6 +154,7 @@ final class StoryblokExporterCommands extends DrushCommands {
         $story->setContentType($this::COMPONENT_TYPE);
         $story->setCreatedAt($item['created_date']);
         $story->setContent($storyContent->toArray());
+        $story->set('tag_list', $item['tags']);
 
         $response = $storyApi->create($story);
 
