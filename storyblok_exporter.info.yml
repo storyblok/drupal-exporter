@@ -1,5 +1,7 @@
-name: 'Storyblok exporter'
+name: 'Storyblok Exporter'
 type: module
-description: '@todo Add description.'
-package: '@todo Add package'
+description: 'Exports Drupal articles to Storyblok using the Management API.'
+package: 'Content Export'
 core_version_requirement: ^10 || ^11
+dependencies:
+  - drupal:node

@@ -1,5 +1,4 @@
 <?php
-// phpcs:disable
 namespace Drupal\storyblok_exporter\Drush\Commands;
 
 use Drush\Attributes as CLI;

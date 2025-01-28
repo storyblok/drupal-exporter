@@ -11,7 +11,8 @@ The **Storyblok Exporter** module allows you to export Drupal blog articles to t
 ## Requirements
 - Drupal 10+
 - Drush 9+
-- A Storyblok account with a Space, a Datasource and a Personal access token
+- Storyblok Management API PHP SDK (`storyblok/php-management-api-client`)
+- A Storyblok account with a Space and a Personal access token
 
 ## Drupal Installation
 I recommend using `ddev` for local development, which is based on Docker.
@@ -39,32 +40,39 @@ ddev launch
 ddev launch $(ddev drush uli)
 ```
 
-## Storyblok Exporter Installation
-1. Download or clone this repository into your Drupal module directory (e.g., `/path/to/drupal/web/modules/`).
+## Installation
 
-2. Enable the module by running
+### 1. Install the Storyblok Management API SDK
+First, add the Storyblok Management API SDK to your project:
+
+```bash
+$ [ddev] composer require storyblok/php-management-api-client
+```
+
+### 2. Install the Module
+Download or clone this repository into your Drupal module directory (e.g., `/path/to/drupal/web/modules/`).
+
+Enable the module by running:
 ```bash
 $ [ddev] drush en storyblok_exporter
 ```
 Or through the Drupal admin interface.
 
 ## Module Usage
-In **Storyblok**, create a new Space, take note of the **Space ID**. Then create a Datasource, and take note of the **Datasource ID**.
+In **Storyblok**, create a new Space and take note of the **Space ID**.
 
-Then create a Block of type `Content type` with the following fields:
+Then create a Block of type `Content type` named `article` with the following fields:
 - title: Text
 - body: Richtext
 - image: Asset
-- tags: Multi-Options
 
-**Note**: it's required to have this exact field names and types because the mapping is currently fixed in the drush commmand.
+**Note**: It's required to have these exact field names and types because the mapping is currently fixed in the code.
 
-Set your Storyblok `Personal access token`, the `Space ID` and the `Datasource ID` that you want to export content to in your `settings.local.php`. If this is a fresh Drupal installation, go to `web/sites/default/settings.php`, uncomment the last lines, and then create a `settings.local.php` in the same folder with the following content:
+Set your Storyblok `Personal access token` and the `Space ID` in your `settings.local.php`. If this is a fresh Drupal installation, go to `web/sites/default/settings.php`, uncomment the last lines, and then create a `settings.local.php` in the same folder with the following content:
 
 ```php
 $settings['STORYBLOK_OAUTH_TOKEN'] = 'your-oauth-token'; // this is the Personal access token (in Account settings in Storyblok)
 $settings['STORYBLOK_SPACE_ID'] = 'your-space-id'; // this is the ID of your Space (no #)
-$settings['STORYBLOK_DATASOURCE_ID'] = 'your-datasource-id'; // this is required for migrating tags
 ```
 
 In **Drupal**, create some content of type `article`, fill all the fields with some content.
@@ -84,13 +92,17 @@ There are some options for the command, check the command help.
 If everything is correct, you should see something similar to the following output:
 ```bash
 $ [ddev] drush storyblok_exporter:export
-Successfully created datasource entry: drupal
 Uploading image: drupal.jpg
 Successfully uploaded image: drupal.jpg
+Creating tags: Drupal, CMS
+Successfully created tag: Drupal
+Successfully created tag: CMS
 Successfully migrated: Drupal is an open source CMS
-Successfully created datasource entry: storyblok
 Uploading image: astro-cover.webp
 Successfully uploaded image: astro-cover.webp
+Creating tags: Storyblok, Astro
+Successfully created tag: Storyblok
+Successfully created tag: Astro
 Successfully migrated: I am switching to Storyblok and Astro
  [success] Exported 2 articles to Storyblok.
  [success] Content succesfully exported 🎉
